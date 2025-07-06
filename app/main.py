@@ -8,12 +8,15 @@ def main():
     # Uncomment this to pass the first stage
     #
     server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
-
     clint_scoket, _= server_socket.accept()
-    clint_scoket.recv(1024)  
-    clint_scoket.sendall(b"+PONG\r\n")
-    clint_scoket.close()
-
+    try:
+     while True:
+      data =  clint_scoket.recv(1024)  
+      if not data:
+          break
+     clint_scoket.sendall(b"+PONG\r\n")
+    finally:
+     clint_scoket.close()
 
 
 if __name__ == "__main__":
