@@ -14,7 +14,7 @@ def main():
       data =  clint_scoket.recv(1024)  
       if not data:
           break
-     clint_scoket.sendall(b"+PONG\r\n")
+      clint_scoket.sendall(b"+PONG\r\n")
     finally:
      clint_scoket.close()
 
