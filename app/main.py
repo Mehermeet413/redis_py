@@ -86,22 +86,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()                    connection.sendall(encode_null_bulk_string())
-            else:
-                connection.sendall(b"-ERR unknown command\r\n")
-
-    finally:
-        connection.close()
-
-
-def main():
-    server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
-    print("Listening on port 6379...")
-    while True:
-        connection, _ = server_socket.accept()
-        thread = threading.Thread(target=handle_connection, args=(connection,))
-        thread.start()
-
-
-if __name__ == "__main__":
     main()
