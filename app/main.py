@@ -2,72 +2,13 @@ import socket  # noqa: F401
 import threading
 import time
 import sys
-import argparse
 import os
 import struct
 
-# In-memory storage for key-value pairs
-# Format: {key: {"value": value, "expiry": timestamp_in_seconds}}
-redis_store = {}
-
-# Configuration storage
-config = {
-    "dir": "/tmp/redis-files",  # Default value
-    "dbfilename": "dump.rdb"     # Default value
-}
-
-# Replication configuration
-replication_config = {
-    "role": "master",  # Default role is master
-    "master_host": None,
-    "master_port": None,
-    "master_replid": "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb",  # 40-character replication ID
-    "master_repl_offset": 0  # Replication offset starts at 0
-}
-
-
-def parse_resp(data: bytes):
-    """
-    Parses RESP arrays like: *2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n
-    Returns: ["ECHO", "hey"]
-    """
-    if not data.startswith(b"*"):
-        return None
-
-    lines = data.split(b"\r\n")
-    num_elements = int(lines[0][1:])
-
-    elements = []
-    i = 1
-    while len(elements) < num_elements and i < len(lines):
-        if lines[i].startswith(b"$"):
-            length = int(lines[i][1:])
-            value = lines[i + 1]
-            elements.append(value.decode())
-            i += 2
-        else:
-            i += 1
-    return elements
-
-
-def encode_bulk_string(value: str):
-    return f"${len(value)}\r\n{value}\r\n".encode()
-
-
-def encode_null_bulk_string():
-    return b"$-1\r\n"
-
-
-def encode_resp_array(elements):
-    """
-    Encode a RESP array from a list of strings.
-    Example: ["dir", "/tmp/redis-files"] -> *2\r\n$3\r\ndir\r\n$16\r\n/tmp/redis-files\r\n
-    """
-    result = f"*{len(elements)}\r\n".encode()
-    for element in elements:
-        result += encode_bulk_string(element)
-    return result
-
+from config import config, replication_config, redis_store
+from args_parser import parse_arguments
+from resp_protocol import parse_resp, encode_bulk_string, encode_null_bulk_string, encode_resp_array
+from commands import handle_connection
 
 def is_key_expired(key):
     """
@@ -83,102 +24,6 @@ def is_key_expired(key):
             del redis_store[key]
             return True
     return False
-
-
-def handle_connection(connection):
-    try:
-        while True:
-            data: bytes = connection.recv(1024)
-            if not data:
-                break
-
-            print(f"Received: {data}")
-            command = parse_resp(data)
-
-            if command is None:
-                continue
-
-            cmd = command[0].upper()
-
-            if cmd == "PING":
-                connection.sendall(b"+PONG\r\n")
-            elif cmd == "ECHO" and len(command) == 2:
-                message = command[1]
-                connection.sendall(encode_bulk_string(message))
-            elif cmd == "SET":
-                if len(command) == 3:
-                    # SET key value
-                    key = command[1]
-                    value = command[2]
-                    redis_store[key] = value
-                    connection.sendall(b"+OK\r\n")
-                elif len(command) == 5 and command[3].upper() == "PX":
-                    # SET key value PX milliseconds
-                    key = command[1]
-                    value = command[2]
-                    expiry_ms = int(command[4])
-                    expiry_time = time.time() + (expiry_ms / 1000.0)
-                    redis_store[key] = {"value": value, "expiry": expiry_time}
-                    connection.sendall(b"+OK\r\n")
-                else:
-                    connection.sendall(b"-ERR wrong number of arguments for 'set' command\r\n")
-            elif cmd == "GET" and len(command) == 2:
-                key = command[1]
-                # Check if key exists and is not expired
-                if key in redis_store and not is_key_expired(key):
-                    key_data = redis_store[key]
-                    if isinstance(key_data, dict):
-                        value = key_data["value"]
-                    else:
-                        value = key_data  # For backwards compatibility with non-expiring keys
-                    connection.sendall(encode_bulk_string(value))
-                else:
-                    connection.sendall(encode_null_bulk_string())
-            elif cmd == "CONFIG" and len(command) == 3 and command[1].upper() == "GET":
-                param_name = command[2].lower()
-                if param_name in config:
-                    response = encode_resp_array([param_name, config[param_name]])
-                    connection.sendall(response)
-                else:
-                    # Return empty array for unknown configuration parameters
-                    connection.sendall(b"*0\r\n")
-            elif cmd == "KEYS" and len(command) == 2:
-                pattern = command[1]
-                if pattern == "*":
-                    # Return all keys (filter out expired ones)
-                    active_keys = []
-                    for key in list(redis_store.keys()):
-                        if not is_key_expired(key):
-                            active_keys.append(key)
-                    response = encode_resp_array(active_keys)
-                    connection.sendall(response)
-                else:
-                    # For this stage, only support "*" pattern
-                    connection.sendall(b"*0\r\n")
-            elif cmd == "INFO" and len(command) == 2:
-                section = command[1].lower()
-                if section == "replication":
-                    # Return replication information as a bulk string
-                    role = replication_config["role"]
-                    replid = replication_config["master_replid"]
-                    offset = replication_config["master_repl_offset"]
-                    
-                    # Build multi-line response
-                    info_lines = [
-                        f"role:{role}",
-                        f"master_replid:{replid}",
-                        f"master_repl_offset:{offset}"
-                    ]
-                    info_response = "\n".join(info_lines)
-                    connection.sendall(encode_bulk_string(info_response))
-                else:
-                    # For this stage, only support replication section
-                    connection.sendall(encode_bulk_string(""))
-            else:
-                connection.sendall(b"-ERR unknown command\r\n")
-
-    finally:
-        connection.close()
 
 
 def load_rdb_file(file_path):
@@ -299,16 +144,37 @@ def read_size_encoded(f):
         raise ValueError(f"Unknown encoding pattern: 0x{byte:02x}")
 
 
-def parse_arguments():
+def connect_to_master():
     """
-    Parse command-line arguments for --dir, --dbfilename, --port, and --replicaof.
+    Connects to the master server and performs the initial handshake.
+    Sends a PING command as the first step of the replication handshake.
     """
-    parser = argparse.ArgumentParser(description="Redis Server")
-    parser.add_argument("--dir", default="/tmp/redis-files", help="Directory for RDB file")
-    parser.add_argument("--dbfilename", default="dump.rdb", help="RDB filename")
-    parser.add_argument("--port", type=int, default=6379, help="Port number to bind to")
-    parser.add_argument("--replicaof", help="Make this server a replica of another server (format: 'host port')")
-    return parser.parse_args()
+    master_host = replication_config["master_host"]
+    master_port = replication_config["master_port"]
+    
+    try:
+        # Create connection to master
+        master_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        master_socket.connect((master_host, master_port))
+        print(f"Connected to master at {master_host}:{master_port}")
+        
+        # Send PING command in RESP format: *1\r\n$4\r\nPING\r\n
+        ping_command = b"*1\r\n$4\r\nPING\r\n"
+        master_socket.send(ping_command)
+        print("Sent PING command to master")
+        
+        # Receive response from master
+        response = master_socket.recv(1024)
+        print(f"Received response from master: {response}")
+        
+        # Keep the connection open for future replication steps
+        # For now, we'll close it, but in later stages this will remain open
+        master_socket.close()
+        print("Handshake completed successfully")
+        
+    except Exception as e:
+        print(f"Error connecting to master: {e}")
+        sys.exit(1)
 
 
 def main():
@@ -340,6 +206,10 @@ def main():
         load_rdb_file(rdb_file_path)
     except Exception as e:
         print(f"Error loading RDB file: {e}")
+    
+    # If this is a replica, connect to master and perform handshake
+    if replication_config["role"] == "slave":
+        connect_to_master()
     
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
