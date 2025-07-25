@@ -221,8 +221,29 @@ def read_encoded_string(f):
     """
     Reads an encoded string from the file.
     """
-    length = read_size_encoded(f)
-    return f.read(length).decode()
+    # First, peek at the length byte to check for special encodings
+    pos = f.tell()
+    length_byte = ord(f.read(1))
+    f.seek(pos)
+    
+    if (length_byte & 0xC0) == 0xC0:  # Special string encoding
+        encoding_type = length_byte & 0x3F
+        f.read(1)  # consume the length byte
+        if encoding_type == 0:  # 8-bit integer
+            value = struct.unpack('B', f.read(1))[0]
+            return str(value)
+        elif encoding_type == 1:  # 16-bit integer
+            value = struct.unpack('<H', f.read(2))[0]
+            return str(value)
+        elif encoding_type == 2:  # 32-bit integer
+            value = struct.unpack('<I', f.read(4))[0]
+            return str(value)
+        else:
+            raise ValueError(f"Unsupported special string encoding: {encoding_type}")
+    else:
+        # Regular string encoding
+        length = read_size_encoded(f)
+        return f.read(length).decode()
 
 
 def read_size_encoded(f):
@@ -236,8 +257,18 @@ def read_size_encoded(f):
         return ((byte & 0x3F) << 8) | ord(f.read(1))
     elif (byte & 0xC0) == 0x80:  # 32-bit encoding
         return struct.unpack(">I", f.read(4))[0]
+    elif (byte & 0xC0) == 0xC0:  # Special string encoding
+        encoding_type = byte & 0x3F
+        if encoding_type == 0:  # 8-bit integer
+            return struct.unpack('B', f.read(1))[0]
+        elif encoding_type == 1:  # 16-bit integer
+            return struct.unpack('<H', f.read(2))[0]
+        elif encoding_type == 2:  # 32-bit integer
+            return struct.unpack('<I', f.read(4))[0]
+        else:
+            raise ValueError(f"Unsupported special encoding: {encoding_type}")
     else:
-        raise ValueError("Unsupported encoding.")
+        raise ValueError(f"Unknown encoding pattern: 0x{byte:02x}")
 
 
 def parse_arguments():
