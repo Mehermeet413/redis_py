@@ -16,6 +16,13 @@ config = {
     "dbfilename": "dump.rdb"     # Default value
 }
 
+# Replication configuration
+replication_config = {
+    "role": "master",  # Default role is master
+    "master_host": None,
+    "master_port": None
+}
+
 
 def parse_resp(data: bytes):
     """
@@ -150,7 +157,8 @@ def handle_connection(connection):
                 section = command[1].lower()
                 if section == "replication":
                     # Return replication information as a bulk string
-                    info_response = "role:master"
+                    role = replication_config["role"]
+                    info_response = f"role:{role}"
                     connection.sendall(encode_bulk_string(info_response))
                 else:
                     # For this stage, only support replication section
@@ -282,12 +290,13 @@ def read_size_encoded(f):
 
 def parse_arguments():
     """
-    Parse command-line arguments for --dir, --dbfilename, and --port.
+    Parse command-line arguments for --dir, --dbfilename, --port, and --replicaof.
     """
     parser = argparse.ArgumentParser(description="Redis Server")
     parser.add_argument("--dir", default="/tmp/redis-files", help="Directory for RDB file")
     parser.add_argument("--dbfilename", default="dump.rdb", help="RDB filename")
     parser.add_argument("--port", type=int, default=6379, help="Port number to bind to")
+    parser.add_argument("--replicaof", help="Make this server a replica of another server (format: 'host port')")
     return parser.parse_args()
 
 
@@ -298,7 +307,21 @@ def main():
     config["dbfilename"] = args.dbfilename
     port = args.port
     
-    print(f"Configuration: dir={config['dir']}, dbfilename={config['dbfilename']}, port={port}")
+    # Handle replicaof configuration
+    if args.replicaof:
+        try:
+            master_host, master_port = args.replicaof.split()
+            replication_config["role"] = "slave"
+            replication_config["master_host"] = master_host
+            replication_config["master_port"] = int(master_port)
+            print(f"Configured as replica of {master_host}:{master_port}")
+        except ValueError:
+            print("Error: --replicaof format should be 'host port'")
+            sys.exit(1)
+    else:
+        print("Configured as master")
+    
+    print(f"Configuration: dir={config['dir']}, dbfilename={config['dbfilename']}, port={port}, role={replication_config['role']}")
     
     # Load RDB file if it exists
     rdb_file_path = os.path.join(config["dir"], config["dbfilename"])
