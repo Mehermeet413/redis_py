@@ -273,11 +273,12 @@ def read_size_encoded(f):
 
 def parse_arguments():
     """
-    Parse command-line arguments for --dir and --dbfilename.
+    Parse command-line arguments for --dir, --dbfilename, and --port.
     """
     parser = argparse.ArgumentParser(description="Redis Server")
     parser.add_argument("--dir", default="/tmp/redis-files", help="Directory for RDB file")
     parser.add_argument("--dbfilename", default="dump.rdb", help="RDB filename")
+    parser.add_argument("--port", type=int, default=6379, help="Port number to bind to")
     return parser.parse_args()
 
 
@@ -286,8 +287,9 @@ def main():
     args = parse_arguments()
     config["dir"] = args.dir
     config["dbfilename"] = args.dbfilename
+    port = args.port
     
-    print(f"Configuration: dir={config['dir']}, dbfilename={config['dbfilename']}")
+    print(f"Configuration: dir={config['dir']}, dbfilename={config['dbfilename']}, port={port}")
     
     # Load RDB file if it exists
     rdb_file_path = os.path.join(config["dir"], config["dbfilename"])
@@ -298,9 +300,9 @@ def main():
     
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(("localhost", 6379))
+    server_socket.bind(("localhost", port))
     server_socket.listen(5)
-    print("Listening on port 6379...")
+    print(f"Listening on port {port}...")
     while True:
         connection, _ = server_socket.accept()
         thread = threading.Thread(target=handle_connection, args=(connection,))
