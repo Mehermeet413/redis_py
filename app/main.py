@@ -146,6 +146,15 @@ def handle_connection(connection):
                 else:
                     # For this stage, only support "*" pattern
                     connection.sendall(b"*0\r\n")
+            elif cmd == "INFO" and len(command) == 2:
+                section = command[1].lower()
+                if section == "replication":
+                    # Return replication information as a bulk string
+                    info_response = "role:master"
+                    connection.sendall(encode_bulk_string(info_response))
+                else:
+                    # For this stage, only support replication section
+                    connection.sendall(encode_bulk_string(""))
             else:
                 connection.sendall(b"-ERR unknown command\r\n")
 
