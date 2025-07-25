@@ -1,7 +1,9 @@
 import socket  # noqa: F401
 import threading
+import time
 
 # In-memory storage for key-value pairs
+# Format: {key: {"value": value, "expiry": timestamp_in_seconds}}
 redis_store = {}
 
 
@@ -37,6 +39,22 @@ def encode_null_bulk_string():
     return b"$-1\r\n"
 
 
+def is_key_expired(key):
+    """
+    Check if a key has expired and remove it if so.
+    Returns True if the key was expired and removed, False otherwise.
+    """
+    if key not in redis_store:
+        return False
+    
+    key_data = redis_store[key]
+    if isinstance(key_data, dict) and "expiry" in key_data:
+        if time.time() > key_data["expiry"]:
+            del redis_store[key]
+            return True
+    return False
+
+
 def handle_connection(connection):
     try:
         while True:
@@ -57,15 +75,32 @@ def handle_connection(connection):
             elif cmd == "ECHO" and len(command) == 2:
                 message = command[1]
                 connection.sendall(encode_bulk_string(message))
-            elif cmd == "SET" and len(command) == 3:
-                key = command[1]
-                value = command[2]
-                redis_store[key] = value
-                connection.sendall(b"+OK\r\n")
+            elif cmd == "SET":
+                if len(command) == 3:
+                    # SET key value
+                    key = command[1]
+                    value = command[2]
+                    redis_store[key] = value
+                    connection.sendall(b"+OK\r\n")
+                elif len(command) == 5 and command[3].upper() == "PX":
+                    # SET key value PX milliseconds
+                    key = command[1]
+                    value = command[2]
+                    expiry_ms = int(command[4])
+                    expiry_time = time.time() + (expiry_ms / 1000.0)
+                    redis_store[key] = {"value": value, "expiry": expiry_time}
+                    connection.sendall(b"+OK\r\n")
+                else:
+                    connection.sendall(b"-ERR wrong number of arguments for 'set' command\r\n")
             elif cmd == "GET" and len(command) == 2:
                 key = command[1]
-                if key in redis_store:
-                    value = redis_store[key]
+                # Check if key exists and is not expired
+                if key in redis_store and not is_key_expired(key):
+                    key_data = redis_store[key]
+                    if isinstance(key_data, dict):
+                        value = key_data["value"]
+                    else:
+                        value = key_data  # For backwards compatibility with non-expiring keys
                     connection.sendall(encode_bulk_string(value))
                 else:
                     connection.sendall(encode_null_bulk_string())
@@ -77,7 +112,10 @@ def handle_connection(connection):
 
 
 def main():
-    server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind(("localhost", 6379))
+    server_socket.listen(5)
     print("Listening on port 6379...")
     while True:
         connection, _ = server_socket.accept()
