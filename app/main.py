@@ -3,6 +3,8 @@ import threading
 import time
 import sys
 import argparse
+import os
+import struct
 
 # In-memory storage for key-value pairs
 # Format: {key: {"value": value, "expiry": timestamp_in_seconds}}
@@ -131,11 +133,111 @@ def handle_connection(connection):
                 else:
                     # Return empty array for unknown configuration parameters
                     connection.sendall(b"*0\r\n")
+            elif cmd == "KEYS" and len(command) == 2:
+                pattern = command[1]
+                if pattern == "*":
+                    # Return all keys (filter out expired ones)
+                    active_keys = []
+                    for key in list(redis_store.keys()):
+                        if not is_key_expired(key):
+                            active_keys.append(key)
+                    response = encode_resp_array(active_keys)
+                    connection.sendall(response)
+                else:
+                    # For this stage, only support "*" pattern
+                    connection.sendall(b"*0\r\n")
             else:
                 connection.sendall(b"-ERR unknown command\r\n")
 
     finally:
         connection.close()
+
+
+def load_rdb_file(file_path):
+    """
+    Loads the RDB file and populates the in-memory database.
+    """
+    if not os.path.exists(file_path):
+        print("RDB file not found, starting with an empty database.")
+        return
+
+    print(f"Loading RDB file: {file_path}")
+    with open(file_path, "rb") as f:
+        # Read and verify the header
+        header = f.read(9)
+        if not header.startswith(b"REDIS"):
+            raise ValueError("Invalid RDB file format.")
+        print(f"RDB version: {header.decode()}")
+
+        # Parse the RDB file
+        while True:
+            byte = f.read(1)
+            if not byte:
+                break
+
+            byte_val = ord(byte)
+            
+            if byte_val == 0xFA:  # Metadata section
+                # Skip metadata
+                key = read_encoded_string(f)
+                value = read_encoded_string(f)
+                print(f"Metadata: {key} = {value}")
+            elif byte_val == 0xFE:  # Database section
+                db_index = read_size_encoded(f)
+                print(f"Database index: {db_index}")
+            elif byte_val == 0xFB:  # Hash table size info
+                hash_table_size = read_size_encoded(f)
+                expire_hash_table_size = read_size_encoded(f)
+                print(f"Hash table sizes: {hash_table_size}, {expire_hash_table_size}")
+            elif byte_val == 0xFF:  # End of file
+                print("End of RDB file.")
+                break
+            elif byte_val == 0xFC:  # Expire time in milliseconds
+                expire_time_ms = struct.unpack('<Q', f.read(8))[0]
+                value_type = ord(f.read(1))
+                key = read_encoded_string(f)
+                value = read_encoded_string(f)
+                expire_time_sec = expire_time_ms / 1000.0
+                redis_store[key] = {"value": value, "expiry": expire_time_sec}
+                print(f"Loaded key with expiry: {key} = {value} (expires at {expire_time_sec})")
+            elif byte_val == 0xFD:  # Expire time in seconds
+                expire_time_sec = struct.unpack('<I', f.read(4))[0]
+                value_type = ord(f.read(1))
+                key = read_encoded_string(f)
+                value = read_encoded_string(f)
+                redis_store[key] = {"value": value, "expiry": float(expire_time_sec)}
+                print(f"Loaded key with expiry: {key} = {value} (expires at {expire_time_sec})")
+            elif byte_val == 0x00:  # String value type
+                key = read_encoded_string(f)
+                value = read_encoded_string(f)
+                redis_store[key] = value
+                print(f"Loaded key: {key} = {value}")
+            else:
+                print(f"Unknown byte: 0x{byte_val:02x}")
+                break
+
+
+def read_encoded_string(f):
+    """
+    Reads an encoded string from the file.
+    """
+    length = read_size_encoded(f)
+    return f.read(length).decode()
+
+
+def read_size_encoded(f):
+    """
+    Reads a size-encoded integer from the file.
+    """
+    byte = ord(f.read(1))
+    if (byte & 0xC0) == 0x00:  # 6-bit encoding
+        return byte & 0x3F
+    elif (byte & 0xC0) == 0x40:  # 14-bit encoding
+        return ((byte & 0x3F) << 8) | ord(f.read(1))
+    elif (byte & 0xC0) == 0x80:  # 32-bit encoding
+        return struct.unpack(">I", f.read(4))[0]
+    else:
+        raise ValueError("Unsupported encoding.")
 
 
 def parse_arguments():
@@ -155,6 +257,13 @@ def main():
     config["dbfilename"] = args.dbfilename
     
     print(f"Configuration: dir={config['dir']}, dbfilename={config['dbfilename']}")
+    
+    # Load RDB file if it exists
+    rdb_file_path = os.path.join(config["dir"], config["dbfilename"])
+    try:
+        load_rdb_file(rdb_file_path)
+    except Exception as e:
+        print(f"Error loading RDB file: {e}")
     
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
