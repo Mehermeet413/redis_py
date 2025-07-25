@@ -4,11 +4,81 @@ import time
 import sys
 import os
 import struct
+import argparse
 
-from config import config, replication_config, redis_store
-from args_parser import parse_arguments
-from resp_protocol import parse_resp, encode_bulk_string, encode_null_bulk_string, encode_resp_array
-from commands import handle_connection
+# Configuration storage
+config = {
+    "dir": "/tmp/redis-files",  # Default value
+    "dbfilename": "dump.rdb"     # Default value
+}
+
+# Replication configuration
+replication_config = {
+    "role": "master",  # Default role is master
+    "master_host": None,
+    "master_port": None,
+    "master_replid": "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb",  # 40-character replication ID
+    "master_repl_offset": 0  # Replication offset starts at 0
+}
+
+# In-memory storage for key-value pairs
+# Format: {key: {"value": value, "expiry": timestamp_in_seconds}}
+redis_store = {}
+
+
+def parse_arguments():
+    """Parse command line arguments for the Redis server."""
+    parser = argparse.ArgumentParser(description="Redis Server")
+    parser.add_argument("--dir", type=str, help="Directory for RDB files")
+    parser.add_argument("--dbfilename", type=str, help="RDB filename")
+    parser.add_argument("--port", type=int, default=6379, help="Port to listen on")
+    parser.add_argument("--replicaof", type=str, help="Master host and port (e.g., 'localhost 6379')")
+    
+    return parser.parse_args()
+
+
+def parse_resp(data: bytes):
+    """
+    Parses RESP arrays like: *2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n
+    Returns: ["ECHO", "hey"]
+    """
+    if not data.startswith(b"*"):
+        return None
+
+    lines = data.split(b"\r\n")
+    num_elements = int(lines[0][1:])
+
+    elements = []
+    i = 1
+    while len(elements) < num_elements and i < len(lines):
+        if lines[i].startswith(b"$"):
+            length = int(lines[i][1:])
+            value = lines[i + 1]
+            elements.append(value.decode())
+            i += 2
+        else:
+            i += 1
+    return elements
+
+
+def encode_bulk_string(value: str):
+    return f"${len(value)}\r\n{value}\r\n".encode()
+
+
+def encode_null_bulk_string():
+    return b"$-1\r\n"
+
+
+def encode_resp_array(elements):
+    """
+    Encode a RESP array from a list of strings.
+    Example: ["dir", "/tmp/redis-files"] -> *2\r\n$3\r\ndir\r\n$16\r\n/tmp/redis-files\r\n
+    """
+    result = f"*{len(elements)}\r\n".encode()
+    for element in elements:
+        result += encode_bulk_string(element)
+    return result
+
 
 def is_key_expired(key):
     """
@@ -24,6 +94,124 @@ def is_key_expired(key):
             del redis_store[key]
             return True
     return False
+
+
+def handle_ping():
+    return b"+PONG\r\n"
+
+
+def handle_echo(message):
+    return encode_bulk_string(message)
+
+
+def handle_set(command):
+    if len(command) == 3:
+        # SET key value
+        key = command[1]
+        value = command[2]
+        redis_store[key] = value
+        return b"+OK\r\n"
+    elif len(command) == 5 and command[3].upper() == "PX":
+        # SET key value PX milliseconds
+        key = command[1]
+        value = command[2]
+        expiry_ms = int(command[4])
+        expiry_time = time.time() + (expiry_ms / 1000.0)
+        redis_store[key] = {"value": value, "expiry": expiry_time}
+        return b"+OK\r\n"
+    else:
+        return b"-ERR wrong number of arguments for 'set' command\r\n"
+
+
+def handle_get(key):
+    # Check if key exists and is not expired
+    if key in redis_store and not is_key_expired(key):
+        key_data = redis_store[key]
+        if isinstance(key_data, dict):
+            value = key_data["value"]
+        else:
+            value = key_data  # For backwards compatibility with non-expiring keys
+        return encode_bulk_string(value)
+    else:
+        return encode_null_bulk_string()
+
+
+def handle_config_get(param_name):
+    param_name = param_name.lower()
+    if param_name in config:
+        response = encode_resp_array([param_name, config[param_name]])
+        return response
+    else:
+        # Return empty array for unknown configuration parameters
+        return b"*0\r\n"
+
+
+def handle_keys(pattern):
+    if pattern == "*":
+        # Return all keys (filter out expired ones)
+        active_keys = []
+        for key in list(redis_store.keys()):
+            if not is_key_expired(key):
+                active_keys.append(key)
+        response = encode_resp_array(active_keys)
+        return response
+    else:
+        # For this stage, only support "*" pattern
+        return b"*0\r\n"
+
+
+def handle_info_replication():
+    # Return replication information as a bulk string
+    role = replication_config["role"]
+    replid = replication_config["master_replid"]
+    offset = replication_config["master_repl_offset"]
+    
+    # Build multi-line response
+    info_lines = [
+        f"role:{role}",
+        f"master_replid:{replid}",
+        f"master_repl_offset:{offset}"
+    ]
+    info_response = "\n".join(info_lines)
+    return encode_bulk_string(info_response)
+
+
+def handle_connection(connection):
+    try:
+        while True:
+            data = connection.recv(1024)
+            if not data:
+                break
+
+            # Parse the RESP data
+            command = parse_resp(data)
+            if not command:
+                break
+
+            command_name = command[0].upper()
+
+            if command_name == "PING":
+                response = handle_ping()
+            elif command_name == "ECHO":
+                response = handle_echo(command[1])
+            elif command_name == "SET":
+                response = handle_set(command)
+            elif command_name == "GET":
+                response = handle_get(command[1])
+            elif command_name == "CONFIG" and len(command) == 3 and command[1].upper() == "GET":
+                response = handle_config_get(command[2])
+            elif command_name == "KEYS":
+                response = handle_keys(command[1])
+            elif command_name == "INFO" and len(command) == 2 and command[1].upper() == "REPLICATION":
+                response = handle_info_replication()
+            else:
+                response = b"-ERR unknown command\r\n"
+
+            connection.send(response)
+    except Exception as e:
+        print(f"Error handling connection: {e}")
+    finally:
+        connection.close()
 
 
 def load_rdb_file(file_path):
