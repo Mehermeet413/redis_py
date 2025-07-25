@@ -20,7 +20,9 @@ config = {
 replication_config = {
     "role": "master",  # Default role is master
     "master_host": None,
-    "master_port": None
+    "master_port": None,
+    "master_replid": "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb",  # 40-character replication ID
+    "master_repl_offset": 0  # Replication offset starts at 0
 }
 
 
@@ -158,7 +160,16 @@ def handle_connection(connection):
                 if section == "replication":
                     # Return replication information as a bulk string
                     role = replication_config["role"]
-                    info_response = f"role:{role}"
+                    replid = replication_config["master_replid"]
+                    offset = replication_config["master_repl_offset"]
+                    
+                    # Build multi-line response
+                    info_lines = [
+                        f"role:{role}",
+                        f"master_replid:{replid}",
+                        f"master_repl_offset:{offset}"
+                    ]
+                    info_response = "\n".join(info_lines)
                     connection.sendall(encode_bulk_string(info_response))
                 else:
                     # For this stage, only support replication section
