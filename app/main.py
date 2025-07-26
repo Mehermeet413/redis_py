@@ -368,8 +368,10 @@ def connect_to_master():
 def main():
     # Parse command-line arguments and update config
     args = parse_arguments()
-    config["dir"] = args.dir
-    config["dbfilename"] = args.dbfilename
+    if args.dir is not None:
+        config["dir"] = args.dir
+    if args.dbfilename is not None:
+        config["dbfilename"] = args.dbfilename
     port = args.port
     
     # Handle replicaof configuration
