@@ -335,7 +335,7 @@ def read_size_encoded(f):
 def connect_to_master():
     """
     Connects to the master server and performs the initial handshake.
-    Sends a PING command as the first step of the replication handshake.
+    Sends PING, then two REPLCONF commands as part of the replication handshake.
     """
     master_host = replication_config["master_host"]
     master_port = replication_config["master_port"]
@@ -346,14 +346,41 @@ def connect_to_master():
         master_socket.connect((master_host, master_port))
         print(f"Connected to master at {master_host}:{master_port}")
         
-        # Send PING command in RESP format: *1\r\n$4\r\nPING\r\n
+        # Step 1: Send PING command in RESP format: *1\r\n$4\r\nPING\r\n
         ping_command = b"*1\r\n$4\r\nPING\r\n"
         master_socket.send(ping_command)
         print("Sent PING command to master")
         
         # Receive response from master
         response = master_socket.recv(1024)
-        print(f"Received response from master: {response}")
+        print(f"Received PING response from master: {response}")
+        
+        # Step 2: Send REPLCONF listening-port <PORT>
+        # Get the port this replica is listening on
+        replica_port = str(6379)  # Default port, will be updated in main()
+        # Get the actual port from arguments if available
+        if 'replica_port' in globals():
+            replica_port = str(globals()['replica_port'])
+        
+        # Format: *3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$<port_len>\r\n<port>\r\n
+        port_str = replica_port
+        replconf_port_command = f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${len(port_str)}\r\n{port_str}\r\n".encode()
+        master_socket.send(replconf_port_command)
+        print(f"Sent REPLCONF listening-port {port_str} command to master")
+        
+        # Receive response from master
+        response = master_socket.recv(1024)
+        print(f"Received REPLCONF listening-port response from master: {response}")
+        
+        # Step 3: Send REPLCONF capa psync2
+        # Format: *3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n
+        replconf_capa_command = b"*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n"
+        master_socket.send(replconf_capa_command)
+        print("Sent REPLCONF capa psync2 command to master")
+        
+        # Receive response from master
+        response = master_socket.recv(1024)
+        print(f"Received REPLCONF capa response from master: {response}")
         
         # Keep the connection open for future replication steps
         # For now, we'll close it, but in later stages this will remain open
