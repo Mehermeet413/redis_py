@@ -378,6 +378,16 @@ def connect_to_master(replica_port):
         response = master_socket.recv(1024)
         print(f"Received REPLCONF capa response from master: {response}")
         
+        # Step 4: Send PSYNC ? -1
+        # Format: *3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n
+        psync_command = b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n"
+        master_socket.send(psync_command)
+        print("Sent PSYNC ? -1 command to master")
+        
+        # Receive response from master
+        response = master_socket.recv(1024)
+        print(f"Received PSYNC response from master: {response}")
+        
         # Keep the connection open for future replication steps
         # For now, we'll close it, but in later stages this will remain open
         master_socket.close()
