@@ -197,6 +197,29 @@ def handle_replconf(command):
     return b"+OK\r\n"
 
 
+def handle_psync(command):
+    """
+    Handles PSYNC command from replicas during handshake.
+    Responds with FULLRESYNC since this is initial synchronization.
+    """
+    # Log the PSYNC command for debugging
+    if len(command) >= 3:
+        repl_id = command[1]
+        offset = command[2]
+        print(f"Received PSYNC with repl_id='{repl_id}' offset='{offset}'")
+    
+    # Since this is the first time replica is connecting (repl_id=? and offset=-1),
+    # we respond with FULLRESYNC containing our replication ID and current offset
+    master_replid = replication_config["master_replid"]
+    master_offset = replication_config["master_repl_offset"]
+    
+    # Format: +FULLRESYNC <REPL_ID> <OFFSET>\r\n
+    response = f"+FULLRESYNC {master_replid} {master_offset}\r\n".encode()
+    print(f"Responding with FULLRESYNC {master_replid} {master_offset}")
+    
+    return response
+
+
 def handle_connection(connection):
     try:
         while True:
@@ -227,6 +250,8 @@ def handle_connection(connection):
                 response = handle_info_replication()
             elif command_name == "REPLCONF":
                 response = handle_replconf(command)
+            elif command_name == "PSYNC":
+                response = handle_psync(command)
             else:
                 response = b"-ERR unknown command\r\n"
 
