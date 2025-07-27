@@ -332,7 +332,7 @@ def read_size_encoded(f):
         raise ValueError(f"Unknown encoding pattern: 0x{byte:02x}")
 
 
-def connect_to_master():
+def connect_to_master(replica_port):
     """
     Connects to the master server and performs the initial handshake.
     Sends PING, then two REPLCONF commands as part of the replication handshake.
@@ -356,14 +356,10 @@ def connect_to_master():
         print(f"Received PING response from master: {response}")
         
         # Step 2: Send REPLCONF listening-port <PORT>
-        # Get the port this replica is listening on
-        replica_port = str(6379)  # Default port, will be updated in main()
-        # Get the actual port from arguments if available
-        if 'replica_port' in globals():
-            replica_port = str(globals()['replica_port'])
+        # Use the actual port this replica is listening on
+        port_str = str(replica_port)
         
         # Format: *3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$<port_len>\r\n<port>\r\n
-        port_str = replica_port
         replconf_port_command = f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${len(port_str)}\r\n{port_str}\r\n".encode()
         master_socket.send(replconf_port_command)
         print(f"Sent REPLCONF listening-port {port_str} command to master")
@@ -426,7 +422,7 @@ def main():
     
     # If this is a replica, connect to master and perform handshake
     if replication_config["role"] == "slave":
-        connect_to_master()
+        connect_to_master(port)
     
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
