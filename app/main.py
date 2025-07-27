@@ -176,6 +176,27 @@ def handle_info_replication():
     return encode_bulk_string(info_response)
 
 
+def handle_replconf(command):
+    """
+    Handles REPLCONF command from replicas during handshake.
+    For now, we ignore the arguments and just respond with OK.
+    """
+    # Log the REPLCONF command for debugging
+    if len(command) >= 2:
+        subcommand = command[1].lower()
+        if subcommand == "listening-port" and len(command) >= 3:
+            port = command[2]
+            print(f"Replica listening on port {port}")
+        elif subcommand == "capa" and len(command) >= 3:
+            capability = command[2]
+            print(f"Replica capability: {capability}")
+        else:
+            print(f"REPLCONF subcommand: {' '.join(command[1:])}")
+    
+    # Always respond with OK for any REPLCONF command
+    return b"+OK\r\n"
+
+
 def handle_connection(connection):
     try:
         while True:
@@ -204,6 +225,8 @@ def handle_connection(connection):
                 response = handle_keys(command[1])
             elif command_name == "INFO" and len(command) == 2 and command[1].upper() == "REPLICATION":
                 response = handle_info_replication()
+            elif command_name == "REPLCONF":
+                response = handle_replconf(command)
             else:
                 response = b"-ERR unknown command\r\n"
 
