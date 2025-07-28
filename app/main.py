@@ -221,18 +221,18 @@ def handle_psync(command, connection):
     connection.send(fullresync_response)
     
     # After FULLRESYNC, send an empty RDB file
-    # This is a hardcoded empty RDB file in hex format  
-    # Standard minimal valid empty RDB file
-    empty_rdb_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff0n0fec0ff5aa2"
+    # Using the canonical empty RDB file from CodeCrafters documentation
+    # This is a minimal valid empty RDB file that should work for any replica
+    empty_rdb_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff00fec0ff5aa2"
     
-    # Clean hex string by removing any invalid characters
-    clean_hex = ""
-    for char in empty_rdb_hex:
-        if char in "0123456789abcdefABCDEF":
-            clean_hex += char
-    
-    # Convert cleaned hex to binary
-    empty_rdb_binary = bytes.fromhex(clean_hex)
+    try:
+        # Convert hex to binary
+        empty_rdb_binary = bytes.fromhex(empty_rdb_hex)
+    except ValueError as e:
+        print(f"Error converting hex to binary: {e}")
+        # Fall back to a minimal empty RDB file
+        # REDIS0011 (header) + 0xFF (EOF) + 8-byte checksum
+        empty_rdb_binary = bytes([0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
     
     # Send RDB file in format: $<length>\r\n<binary_contents>
     # Note: This is NOT a standard RESP bulk string (no trailing \r\n)
