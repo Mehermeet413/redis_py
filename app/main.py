@@ -64,6 +64,52 @@ def parse_resp(data: bytes):
     return elements
 
 
+def parse_multiple_resp_commands(data: bytes):
+    """
+    Parses multiple RESP commands from a single buffer.
+    Returns a list of commands and any remaining incomplete data.
+    """
+    commands = []
+    remaining_data = data
+    
+    while remaining_data:
+        if not remaining_data.startswith(b"*"):
+            break
+            
+        # Find the end of this command
+        lines = remaining_data.split(b"\r\n")
+        if len(lines) < 2:
+            break  # Incomplete command
+            
+        try:
+            num_elements = int(lines[0][1:])
+        except (ValueError, IndexError):
+            break
+            
+        # Calculate how many lines this command needs
+        lines_needed = 1 + (num_elements * 2)  # 1 for array header + 2 per element (length + data)
+        
+        if len(lines) < lines_needed:
+            break  # Incomplete command
+            
+        # Extract this command's data
+        command_lines = lines[:lines_needed]
+        command_data = b"\r\n".join(command_lines) + b"\r\n"
+        
+        # Parse this single command
+        command = parse_resp(command_data)
+        if command:
+            commands.append(command)
+            
+        # Remove processed command from remaining data
+        remaining_data = b"\r\n".join(lines[lines_needed:])
+        if remaining_data == b"":
+            remaining_data = b""
+            break
+            
+    return commands, remaining_data
+
+
 def encode_bulk_string(value: str):
     return f"${len(value)}\r\n{value}\r\n".encode()
 
@@ -107,14 +153,18 @@ def handle_echo(message):
     return encode_bulk_string(message)
 
 
-def handle_set(command):
+def handle_set(command, silent=False):
+    """
+    Handles SET command. If silent=True, doesn't return response (for propagated commands).
+    """
     response = None
     if len(command) == 3:
         # SET key value
         key = command[1]
         value = command[2]
         redis_store[key] = value
-        response = b"+OK\r\n"
+        if not silent:
+            response = b"+OK\r\n"
     elif len(command) == 5 and command[3].upper() == "PX":
         # SET key value PX milliseconds
         key = command[1]
@@ -122,15 +172,36 @@ def handle_set(command):
         expiry_ms = int(command[4])
         expiry_time = time.time() + (expiry_ms / 1000.0)
         redis_store[key] = {"value": value, "expiry": expiry_time}
-        response = b"+OK\r\n"
+        if not silent:
+            response = b"+OK\r\n"
     else:
-        return b"-ERR wrong number of arguments for 'set' command\r\n"
+        if not silent:
+            return b"-ERR wrong number of arguments for 'set' command\r\n"
+        return None
     
     # Propagate write commands to replicas if we're acting as master
-    if response is not None and replication_config["role"] == "master":
+    if not silent and response is not None and replication_config["role"] == "master":
         propagate_command_to_replicas(command)
     
     return response
+
+
+def process_propagated_command(command):
+    """
+    Processes a command propagated from master silently (no response).
+    Only processes write commands that affect the replica's state.
+    """
+    if not command:
+        return
+        
+    command_name = command[0].upper()
+    
+    if command_name == "SET":
+        handle_set(command, silent=True)
+        print(f"Processed propagated command: {command}")
+    # Add other write commands as needed (DEL, etc.)
+    else:
+        print(f"Ignoring unsupported propagated command: {command}")
 
 
 def handle_get(key):
@@ -545,10 +616,33 @@ def connect_to_master(replica_port):
         response = master_socket.recv(1024)
         print(f"Received PSYNC response from master: {response}")
         
-        # Keep the connection open for future replication steps
-        # For now, we'll close it, but in later stages this will remain open
+        # Keep the connection open for command propagation
+        remaining_data = b""
+        while True:
+            try:
+                # Try to receive data from master
+                master_socket.settimeout(1.0)  # Set a timeout to periodically check
+                data = master_socket.recv(4096)
+                if not data:
+                    break
+
+                # Concatenate with any remaining incomplete data
+                remaining_data += data
+
+                # Parse and process commands
+                commands, remaining_data = parse_multiple_resp_commands(remaining_data)
+                for command in commands:
+                    process_propagated_command(command)
+
+            except socket.timeout:
+                # Timeout is expected, just continue to keep connection alive
+                continue
+            except Exception as e:
+                print(f"Error receiving data from master: {e}")
+                break
+        
         master_socket.close()
-        print("Handshake completed successfully")
+        print("Replication stream ended")
         
     except Exception as e:
         print(f"Error connecting to master: {e}")
@@ -587,15 +681,20 @@ def main():
     except Exception as e:
         print(f"Error loading RDB file: {e}")
     
-    # If this is a replica, connect to master and perform handshake
-    if replication_config["role"] == "slave":
-        connect_to_master(port)
-    
+    # Start the server to listen for client connections
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind(("localhost", port))
     server_socket.listen(5)
     print(f"Listening on port {port}...")
+    
+    # If this is a replica, connect to master in a separate thread
+    if replication_config["role"] == "slave":
+        replication_thread = threading.Thread(target=connect_to_master, args=(port,))
+        replication_thread.daemon = True  # Dies when main thread dies
+        replication_thread.start()
+    
+    # Accept client connections
     while True:
         connection, _ = server_socket.accept()
         thread = threading.Thread(target=handle_connection, args=(connection,))
