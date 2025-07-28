@@ -197,10 +197,10 @@ def handle_replconf(command):
     return b"+OK\r\n"
 
 
-def handle_psync(command):
+def handle_psync(command, connection):
     """
     Handles PSYNC command from replicas during handshake.
-    Responds with FULLRESYNC since this is initial synchronization.
+    Responds with FULLRESYNC and then sends an empty RDB file.
     """
     # Log the PSYNC command for debugging
     if len(command) >= 3:
@@ -214,10 +214,36 @@ def handle_psync(command):
     master_offset = replication_config["master_repl_offset"]
     
     # Format: +FULLRESYNC <REPL_ID> <OFFSET>\r\n
-    response = f"+FULLRESYNC {master_replid} {master_offset}\r\n".encode()
+    fullresync_response = f"+FULLRESYNC {master_replid} {master_offset}\r\n".encode()
     print(f"Responding with FULLRESYNC {master_replid} {master_offset}")
     
-    return response
+    # Send the FULLRESYNC response first
+    connection.send(fullresync_response)
+    
+    # After FULLRESYNC, send an empty RDB file
+    # This is a hardcoded empty RDB file in hex format  
+    # Standard minimal valid empty RDB file
+    empty_rdb_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff0n0fec0ff5aa2"
+    
+    # Clean hex string by removing any invalid characters
+    clean_hex = ""
+    for char in empty_rdb_hex:
+        if char in "0123456789abcdefABCDEF":
+            clean_hex += char
+    
+    # Convert cleaned hex to binary
+    empty_rdb_binary = bytes.fromhex(clean_hex)
+    
+    # Send RDB file in format: $<length>\r\n<binary_contents>
+    # Note: This is NOT a standard RESP bulk string (no trailing \r\n)
+    rdb_length = len(empty_rdb_binary)
+    rdb_header = f"${rdb_length}\r\n".encode()
+    
+    print(f"Sending empty RDB file ({rdb_length} bytes)")
+    connection.send(rdb_header + empty_rdb_binary)
+    
+    # Return None since we've already sent the response via connection
+    return None
 
 
 def handle_connection(connection):
@@ -251,11 +277,13 @@ def handle_connection(connection):
             elif command_name == "REPLCONF":
                 response = handle_replconf(command)
             elif command_name == "PSYNC":
-                response = handle_psync(command)
+                response = handle_psync(command, connection)
             else:
                 response = b"-ERR unknown command\r\n"
 
-            connection.send(response)
+            # Only send response if it's not None (PSYNC handles its own sending)
+            if response is not None:
+                connection.send(response)
     except Exception as e:
         print(f"Error handling connection: {e}")
     finally:
