@@ -25,6 +25,9 @@ replication_config = {
 # Format: {key: {"value": value, "expiry": timestamp_in_seconds}}
 redis_store = {}
 
+# List to track replica connections for command propagation
+replica_connections = []
+
 
 def parse_arguments():
     """Parse command line arguments for the Redis server."""
@@ -105,12 +108,13 @@ def handle_echo(message):
 
 
 def handle_set(command):
+    response = None
     if len(command) == 3:
         # SET key value
         key = command[1]
         value = command[2]
         redis_store[key] = value
-        return b"+OK\r\n"
+        response = b"+OK\r\n"
     elif len(command) == 5 and command[3].upper() == "PX":
         # SET key value PX milliseconds
         key = command[1]
@@ -118,9 +122,15 @@ def handle_set(command):
         expiry_ms = int(command[4])
         expiry_time = time.time() + (expiry_ms / 1000.0)
         redis_store[key] = {"value": value, "expiry": expiry_time}
-        return b"+OK\r\n"
+        response = b"+OK\r\n"
     else:
         return b"-ERR wrong number of arguments for 'set' command\r\n"
+    
+    # Propagate write commands to replicas if we're acting as master
+    if response is not None and replication_config["role"] == "master":
+        propagate_command_to_replicas(command)
+    
+    return response
 
 
 def handle_get(key):
@@ -197,10 +207,37 @@ def handle_replconf(command):
     return b"+OK\r\n"
 
 
+def propagate_command_to_replicas(command):
+    """
+    Propagates a write command to all connected replicas.
+    Commands are sent as RESP arrays over the replication connection.
+    """
+    if not replica_connections:
+        return  # No replicas to propagate to
+    
+    # Encode the command as a RESP array
+    command_resp = encode_resp_array(command)
+    
+    # Send to all replicas (remove any closed connections)
+    active_replicas = []
+    for replica_conn in replica_connections:
+        try:
+            replica_conn.send(command_resp)
+            active_replicas.append(replica_conn)
+            print(f"Propagated command {command} to replica")
+        except Exception as e:
+            print(f"Failed to propagate command to replica: {e}")
+            # Connection is broken, don't add it back to active list
+    
+    # Update the list with only active connections
+    replica_connections[:] = active_replicas
+
+
 def handle_psync(command, connection):
     """
     Handles PSYNC command from replicas during handshake.
     Responds with FULLRESYNC and then sends an empty RDB file.
+    After the handshake, adds the connection to the replica list for command propagation.
     """
     # Log the PSYNC command for debugging
     if len(command) >= 3:
@@ -242,11 +279,18 @@ def handle_psync(command, connection):
     print(f"Sending empty RDB file ({rdb_length} bytes)")
     connection.send(rdb_header + empty_rdb_binary)
     
-    # Return None since we've already sent the response via connection
-    return None
+    # Add this connection to the replica list for command propagation
+    # Only do this if we're acting as a master
+    if replication_config["role"] == "master":
+        replica_connections.append(connection)
+        print(f"Added replica connection for command propagation (total: {len(replica_connections)})")
+    
+    # Return a special value to indicate this connection should be kept alive for replication
+    return "REPLICA_CONNECTION"
 
 
 def handle_connection(connection):
+    is_replica_connection = False
     try:
         while True:
             data = connection.recv(1024)
@@ -278,16 +322,53 @@ def handle_connection(connection):
                 response = handle_replconf(command)
             elif command_name == "PSYNC":
                 response = handle_psync(command, connection)
+                # Check if this connection became a replica connection
+                if response == "REPLICA_CONNECTION":
+                    is_replica_connection = True
+                    response = None  # Don't send anything back
             else:
                 response = b"-ERR unknown command\r\n"
 
-            # Only send response if it's not None (PSYNC handles its own sending)
-            if response is not None:
+            # Only send response if it's not None and not a replica connection
+            if response is not None and not is_replica_connection:
                 connection.send(response)
+                
+            # If this became a replica connection, keep it alive but don't process more commands from it
+            # The connection will be used only for sending propagated commands
+            if is_replica_connection:
+                print("Connection converted to replica connection, keeping alive for command propagation")
+                # Keep the connection alive but don't process further commands from the replica
+                # The replica won't send more commands anyway, it will just receive propagated commands
+                while True:
+                    try:
+                        # Just keep the connection alive, but ignore any data received
+                        # In a real implementation, we might handle REPLCONF GETACK here
+                        connection.settimeout(1.0)  # Set a timeout to periodically check
+                        data = connection.recv(1024)
+                        if not data:
+                            break
+                    except socket.timeout:
+                        # Timeout is expected, just continue to keep connection alive
+                        continue
+                    except Exception:
+                        # Connection lost
+                        break
+                break
+                
     except Exception as e:
         print(f"Error handling connection: {e}")
     finally:
-        connection.close()
+        # Only close the connection if it's not a replica connection
+        # Replica connections should stay open for command propagation
+        if not is_replica_connection:
+            connection.close()
+        else:
+            print("Replica connection ended, cleaning up")
+            # Remove this connection from replica_connections if it's there
+            if connection in replica_connections:
+                replica_connections.remove(connection)
+                print(f"Removed replica connection (remaining: {len(replica_connections)})")
+            connection.close()
 
 
 def load_rdb_file(file_path):
