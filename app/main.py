@@ -665,6 +665,7 @@ def connect_to_master(replica_port):
                 if len(rdb_data) > rdb_length:
                     remaining_data = rdb_data[rdb_length:]
                     rdb_data = rdb_data[:rdb_length]
+                    print(f"Found {len(remaining_data)} bytes of command data after RDB file")
                 else:
                     remaining_data = b""
             else:
@@ -700,8 +701,15 @@ def connect_to_master(replica_port):
                 print("Error: Expected RDB file header")
                 remaining_data = b""
         
+        # Process any commands that came with the RDB file
+        if remaining_data:
+            print(f"Processing {len(remaining_data)} bytes of command data received with RDB file")
+            commands, remaining_data = parse_multiple_resp_commands(remaining_data)
+            for command in commands:
+                process_propagated_command(command, master_socket)
+        
         # Now keep the connection open for command propagation
-        remaining_data = b""
+        print(f"Starting command processing loop with {len(remaining_data)} bytes of remaining data")
         while True:
             try:
                 # Try to receive data from master
