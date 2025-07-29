@@ -220,7 +220,12 @@ def process_propagated_command(command, master_socket=None, command_bytes=None):
             ack_response = f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n".encode()
             master_socket.send(ack_response)
             print(f"Sent REPLCONF ACK {replica_offset} response to master")
-        # Don't update offset for GETACK command itself
+        
+        # Update offset for this GETACK command AFTER sending the response
+        # The response should contain the offset BEFORE processing this command
+        if command_bytes is not None:
+            replica_offset += len(command_bytes)
+            print(f"Updated replica offset to {replica_offset} (added {len(command_bytes)} bytes for GETACK)")
         return
     # Add other write commands as needed (DEL, etc.)
     else:
