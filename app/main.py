@@ -311,6 +311,33 @@ def handle_replconf(command):
     return b"+OK\r\n"
 
 
+def handle_wait(command):
+    """
+    Handles WAIT command. 
+    WAIT numreplicas timeout
+    
+    For this stage, we hardcode the response to 0 since no replicas are connected.
+    In future stages, this will actually check how many replicas have acknowledged
+    receiving all write commands up to the current point.
+    """
+    if len(command) != 3:
+        return b"-ERR wrong number of arguments for 'wait' command\r\n"
+    
+    try:
+        numreplicas = int(command[1])
+        timeout = int(command[2])
+        print(f"WAIT command: numreplicas={numreplicas}, timeout={timeout}")
+    except ValueError:
+        return b"-ERR invalid arguments for 'wait' command\r\n"
+    
+    # For this stage, hardcode the response to 0
+    # This represents the number of replicas that have acknowledged all writes
+    acknowledged_replicas = 0
+    
+    # Return the count as an integer response
+    return f":{acknowledged_replicas}\r\n".encode()
+
+
 def propagate_command_to_replicas(command):
     """
     Propagates a write command to all connected replicas.
@@ -430,6 +457,8 @@ def handle_connection(connection):
                 if response == "REPLICA_CONNECTION":
                     is_replica_connection = True
                     response = None  # Don't send anything back
+            elif command_name == "WAIT":
+                response = handle_wait(command)
             else:
                 response = b"-ERR unknown command\r\n"
 
