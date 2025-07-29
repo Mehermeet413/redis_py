@@ -21,6 +21,9 @@ replication_config = {
     "master_repl_offset": 0  # Replication offset starts at 0
 }
 
+# Replica offset tracking - tracks bytes of commands processed by replica
+replica_offset = 0
+
 # In-memory storage for key-value pairs
 # Format: {key: {"value": value, "expiry": timestamp_in_seconds}}
 redis_store = {}
@@ -67,7 +70,7 @@ def parse_resp(data: bytes):
 def parse_multiple_resp_commands(data: bytes):
     """
     Parses multiple RESP commands from a single buffer.
-    Returns a list of commands and any remaining incomplete data.
+    Returns a list of tuples (command, command_bytes) and any remaining incomplete data.
     """
     commands = []
     remaining_data = data
@@ -99,7 +102,7 @@ def parse_multiple_resp_commands(data: bytes):
         # Parse this single command
         command = parse_resp(command_data)
         if command:
-            commands.append(command)
+            commands.append((command, command_data))
             
         # Remove processed command from remaining data
         remaining_data = b"\r\n".join(lines[lines_needed:])
@@ -186,12 +189,15 @@ def handle_set(command, silent=False):
     return response
 
 
-def process_propagated_command(command, master_socket=None):
+def process_propagated_command(command, master_socket=None, command_bytes=None):
     """
     Processes a command propagated from master.
     Most commands are processed silently (no response), but REPLCONF GETACK
     requires a response back to the master.
+    Updates the replica offset for all commands except REPLCONF GETACK.
     """
+    global replica_offset
+    
     if not command:
         return
         
@@ -200,18 +206,30 @@ def process_propagated_command(command, master_socket=None):
     if command_name == "SET":
         handle_set(command, silent=True)
         print(f"Processed propagated command: {command}")
+    elif command_name == "PING":
+        # Process PING command silently (masters send these to notify replicas they're alive)
+        print(f"Processed propagated PING command: {command}")
     elif command_name == "REPLCONF" and len(command) >= 3 and command[1].upper() == "GETACK":
         # Handle REPLCONF GETACK * command
         print(f"Received REPLCONF GETACK command: {command}")
+        print(f"Current replica offset before GETACK: {replica_offset}")
         if master_socket:
-            # Respond with REPLCONF ACK 0 (hardcoded offset for now)
-            # Format: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n
-            ack_response = b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
+            # Respond with REPLCONF ACK <current_offset>
+            # Format: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<offset_len>\r\n<offset>\r\n
+            offset_str = str(replica_offset)
+            ack_response = f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n".encode()
             master_socket.send(ack_response)
-            print("Sent REPLCONF ACK 0 response to master")
+            print(f"Sent REPLCONF ACK {replica_offset} response to master")
+        # Don't update offset for GETACK command itself
+        return
     # Add other write commands as needed (DEL, etc.)
     else:
         print(f"Ignoring unsupported propagated command: {command}")
+    
+    # Update replica offset for all commands except REPLCONF GETACK
+    if command_bytes is not None:
+        replica_offset += len(command_bytes)
+        print(f"Updated replica offset to {replica_offset} (added {len(command_bytes)} bytes)")
 
 
 def handle_get(key):
@@ -705,8 +723,8 @@ def connect_to_master(replica_port):
         if remaining_data:
             print(f"Processing {len(remaining_data)} bytes of command data received with RDB file")
             commands, remaining_data = parse_multiple_resp_commands(remaining_data)
-            for command in commands:
-                process_propagated_command(command, master_socket)
+            for command, command_bytes in commands:
+                process_propagated_command(command, master_socket, command_bytes)
         
         # Now keep the connection open for command propagation
         print(f"Starting command processing loop with {len(remaining_data)} bytes of remaining data")
@@ -723,8 +741,8 @@ def connect_to_master(replica_port):
 
                 # Parse and process commands
                 commands, remaining_data = parse_multiple_resp_commands(remaining_data)
-                for command in commands:
-                    process_propagated_command(command, master_socket)
+                for command, command_bytes in commands:
+                    process_propagated_command(command, master_socket, command_bytes)
 
             except socket.timeout:
                 # Timeout is expected, just continue to keep connection alive
