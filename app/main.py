@@ -186,10 +186,11 @@ def handle_set(command, silent=False):
     return response
 
 
-def process_propagated_command(command):
+def process_propagated_command(command, master_socket=None):
     """
-    Processes a command propagated from master silently (no response).
-    Only processes write commands that affect the replica's state.
+    Processes a command propagated from master.
+    Most commands are processed silently (no response), but REPLCONF GETACK
+    requires a response back to the master.
     """
     if not command:
         return
@@ -199,6 +200,15 @@ def process_propagated_command(command):
     if command_name == "SET":
         handle_set(command, silent=True)
         print(f"Processed propagated command: {command}")
+    elif command_name == "REPLCONF" and len(command) >= 3 and command[1].upper() == "GETACK":
+        # Handle REPLCONF GETACK * command
+        print(f"Received REPLCONF GETACK command: {command}")
+        if master_socket:
+            # Respond with REPLCONF ACK 0 (hardcoded offset for now)
+            # Format: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n
+            ack_response = b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
+            master_socket.send(ack_response)
+            print("Sent REPLCONF ACK 0 response to master")
     # Add other write commands as needed (DEL, etc.)
     else:
         print(f"Ignoring unsupported propagated command: {command}")
@@ -632,7 +642,7 @@ def connect_to_master(replica_port):
                 # Parse and process commands
                 commands, remaining_data = parse_multiple_resp_commands(remaining_data)
                 for command in commands:
-                    process_propagated_command(command)
+                    process_propagated_command(command, master_socket)
 
             except socket.timeout:
                 # Timeout is expected, just continue to keep connection alive
