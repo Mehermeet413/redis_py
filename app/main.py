@@ -622,38 +622,83 @@ def connect_to_master(replica_port):
         master_socket.send(psync_command)
         print("Sent PSYNC ? -1 command to master")
         
-        # Receive response from master
-        response = master_socket.recv(1024)
-        print(f"Received PSYNC response from master: {response}")
+        # Receive response from master - this might include both FULLRESYNC and RDB file
+        response_data = master_socket.recv(4096)
+        print(f"Received PSYNC response from master: {response_data}")
         
-        # After PSYNC, we expect to receive an RDB file
+        # Find the end of the FULLRESYNC response
+        fullresync_end = response_data.find(b"\r\n")
+        if fullresync_end == -1:
+            print("Error: Could not find end of FULLRESYNC response")
+            return
+        
+        fullresync_response = response_data[:fullresync_end + 2]
+        remaining_data = response_data[fullresync_end + 2:]
+        
+        print(f"FULLRESYNC response: {fullresync_response}")
+        
+        # After FULLRESYNC, we expect to receive an RDB file
         # The RDB file comes as: $<length>\r\n<binary_data>
-        # We need to read and consume it before processing commands
-        print("Waiting for RDB file...")
-        
-        # Read the RDB file header: $<length>\r\n
-        rdb_header_data = b""
-        while b"\r\n" not in rdb_header_data:
-            chunk = master_socket.recv(1)
-            if not chunk:
-                break
-            rdb_header_data += chunk
-        
-        if rdb_header_data.startswith(b"$"):
-            # Parse the length
-            rdb_length_str = rdb_header_data[1:rdb_header_data.find(b"\r\n")].decode()
-            rdb_length = int(rdb_length_str)
-            print(f"Expecting RDB file of {rdb_length} bytes")
-            
-            # Read the RDB file data
-            rdb_data = b""
-            while len(rdb_data) < rdb_length:
-                chunk = master_socket.recv(min(4096, rdb_length - len(rdb_data)))
+        # Check if RDB header is already in the remaining data
+        if remaining_data.startswith(b"$"):
+            # Find the RDB length
+            rdb_header_end = remaining_data.find(b"\r\n")
+            if rdb_header_end != -1:
+                rdb_length_str = remaining_data[1:rdb_header_end].decode()
+                rdb_length = int(rdb_length_str)
+                print(f"Expecting RDB file of {rdb_length} bytes")
+                
+                # Extract RDB data that's already in the buffer
+                rdb_start = rdb_header_end + 2
+                rdb_data = remaining_data[rdb_start:]
+                
+                # Read any remaining RDB data if needed
+                while len(rdb_data) < rdb_length:
+                    chunk = master_socket.recv(min(4096, rdb_length - len(rdb_data)))
+                    if not chunk:
+                        break
+                    rdb_data += chunk
+                
+                print(f"Received RDB file ({len(rdb_data)} bytes)")
+                
+                # Set remaining_data to any data after the RDB file
+                if len(rdb_data) > rdb_length:
+                    remaining_data = rdb_data[rdb_length:]
+                    rdb_data = rdb_data[:rdb_length]
+                else:
+                    remaining_data = b""
+            else:
+                print("Error: Could not parse RDB header")
+                remaining_data = b""
+        else:
+            # RDB data comes in next packet(s)
+            print("Waiting for RDB file...")
+            rdb_header_data = remaining_data
+            while b"\r\n" not in rdb_header_data:
+                chunk = master_socket.recv(1)
                 if not chunk:
                     break
-                rdb_data += chunk
+                rdb_header_data += chunk
             
-            print(f"Received RDB file ({len(rdb_data)} bytes)")
+            if rdb_header_data.startswith(b"$"):
+                # Parse the length
+                rdb_length_str = rdb_header_data[1:rdb_header_data.find(b"\r\n")].decode()
+                rdb_length = int(rdb_length_str)
+                print(f"Expecting RDB file of {rdb_length} bytes")
+                
+                # Read the RDB file data
+                rdb_data = b""
+                while len(rdb_data) < rdb_length:
+                    chunk = master_socket.recv(min(4096, rdb_length - len(rdb_data)))
+                    if not chunk:
+                        break
+                    rdb_data += chunk
+                
+                print(f"Received RDB file ({len(rdb_data)} bytes)")
+                remaining_data = b""
+            else:
+                print("Error: Expected RDB file header")
+                remaining_data = b""
         
         # Now keep the connection open for command propagation
         remaining_data = b""
