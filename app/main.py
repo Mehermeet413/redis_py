@@ -626,7 +626,36 @@ def connect_to_master(replica_port):
         response = master_socket.recv(1024)
         print(f"Received PSYNC response from master: {response}")
         
-        # Keep the connection open for command propagation
+        # After PSYNC, we expect to receive an RDB file
+        # The RDB file comes as: $<length>\r\n<binary_data>
+        # We need to read and consume it before processing commands
+        print("Waiting for RDB file...")
+        
+        # Read the RDB file header: $<length>\r\n
+        rdb_header_data = b""
+        while b"\r\n" not in rdb_header_data:
+            chunk = master_socket.recv(1)
+            if not chunk:
+                break
+            rdb_header_data += chunk
+        
+        if rdb_header_data.startswith(b"$"):
+            # Parse the length
+            rdb_length_str = rdb_header_data[1:rdb_header_data.find(b"\r\n")].decode()
+            rdb_length = int(rdb_length_str)
+            print(f"Expecting RDB file of {rdb_length} bytes")
+            
+            # Read the RDB file data
+            rdb_data = b""
+            while len(rdb_data) < rdb_length:
+                chunk = master_socket.recv(min(4096, rdb_length - len(rdb_data)))
+                if not chunk:
+                    break
+                rdb_data += chunk
+            
+            print(f"Received RDB file ({len(rdb_data)} bytes)")
+        
+        # Now keep the connection open for command propagation
         remaining_data = b""
         while True:
             try:
